@@ -1,0 +1,132 @@
+import random
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+
+SEED = 42
+N_SAMPLES = 4000
+MAXLEN = 20
+EMBED_DIM = 64
+HIDDEN_DIM = 64
+LR = 1e-3
+BATCH_SIZE = 64
+EPOCHS = 15
+TRAIN_RATIO = 0.8
+MODEL_TYPE = "LSTM"
+
+random.seed(SEED)
+torch.manual_seed(SEED)
+
+happy_sents = [
+    "今天太开心啦","太棒了","超级满意","好喜欢","真不错",
+    "太赞了","心情超好","太幸福了","完美","太舒服了"
+]
+angry_sents = [
+    "气死我了","太过分了","真讨厌","烦死了","太糟糕",
+    "受不了","太失望了","真无语","气死了","太可恶"
+]
+sad_sents = [
+    "好难过","想哭","太伤心了","好委屈","心碎了",
+    "好惨","太可怜","难受死了","好悲伤","太痛苦"
+]
+surprised_sents = [
+    "天啊","不会吧","真的假的","太意外了","吓一跳",
+    "难以置信","太神奇了","居然这样","太不可思议","哇塞"
+]
+
+def build_dataset():
+    data = []
+    for s in happy_sents: data.append((s,0))
+    for s in angry_sents: data.append((s,1))
+    for s in sad_sents: data.append((s,2))
+    for s in surprised_sents: data.append((s,3))
+    data = data*(N_SAMPLES//4)
+    random.shuffle(data)
+    return data
+
+def build_vocab(data):
+    vocab = {"<PAD>":0,"<UNK>":1}
+    for sent,_ in data:
+        for c in sent:
+            if c not in vocab: vocab[c]=len(vocab)
+    return vocab
+
+def encode(sent,vocab,maxlen=MAXLEN):
+    ids = [vocab.get(c,1) for c in sent]
+    ids = ids[:maxlen]
+    ids += [0]*(maxlen-len(ids))
+    return ids
+
+class EmojiDataset(Dataset):
+    def __init__(self,data,vocab):
+        self.X = [encode(s,vocab) for s,_ in data]
+        self.y = [y for _,y in data]
+    def __len__(self): return len(self.y)
+    def __getitem__(self,i):
+        return torch.tensor(self.X[i]),torch.tensor(self.y[i])
+
+class EmojiModel(nn.Module):
+    def __init__(self,vocab_size,num_classes=4):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size,EMBED_DIM,padding_idx=0)
+        if MODEL_TYPE=="RNN":
+            self.rnn = nn.RNN(EMBED_DIM,HIDDEN_DIM,batch_first=True)
+        else:
+            self.rnn = nn.LSTM(EMBED_DIM,HIDDEN_DIM,batch_first=True)
+        self.bn = nn.BatchNorm1d(HIDDEN_DIM)
+        self.drop = nn.Dropout(0.3)
+        self.fc = nn.Linear(HIDDEN_DIM,num_classes)
+    def forward(self,x):
+        x = self.embedding(x)
+        out,_ = self.rnn(x)
+        out = out.max(dim=1)[0]
+        out = self.bn(out)
+        out = self.drop(out)
+        return self.fc(out)
+
+def eval_acc(model,loader):
+    model.eval()
+    cor=tot=0
+    with torch.no_grad():
+        for x,y in loader:
+            pred = model(x).argmax(1)
+            cor+=(pred==y).sum().item()
+            tot+=len(y)
+    return cor/tot
+
+def train():
+    data = build_dataset()
+    vocab = build_vocab(data)
+    split=int(len(data)*TRAIN_RATIO)
+    train_loader=DataLoader(EmojiDataset(data[:split],vocab),batch_size=BATCH_SIZE,shuffle=True)
+    val_loader=DataLoader(EmojiDataset(data[split:],vocab),batch_size=BATCH_SIZE)
+
+    model=EmojiModel(len(vocab))
+    criterion=nn.CrossEntropyLoss()
+    opt=torch.optim.Adam(model.parameters(),lr=LR)
+
+    for ep in range(EPOCHS):
+        model.train()
+        ls=0
+        for x,y in train_loader:
+            opt.zero_grad()
+            o=model(x)
+            loss=criterion(o,y)
+            loss.backward()
+            opt.step()
+            ls+=loss.item()
+        acc=eval_acc(model,val_loader)
+        print(f"Epoch {ep+1:2d} | loss={ls/len(train_loader):.3f} | acc={acc:.3f}")
+
+    print("\n===== 表情预测器 =====")
+    model.eval()
+    emojis=["😊","😠","😢","😮"]
+    tests=["我好开心","气死我了","好难过","不会吧"]
+    with torch.no_grad():
+        for t in tests:
+            ids=torch.tensor([encode(t,vocab)])
+            p=model(ids).argmax().item()
+            print(f"{t} → {emojis[p]}")
+
+if __name__=="__main__":
+    train()
