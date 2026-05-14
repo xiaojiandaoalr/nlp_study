@@ -1,0 +1,146 @@
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+import random
+import string
+
+all_chars = "你我他她它是的在有了人" + string.ascii_letters + "，。；'"
+char_to_idx = {ch: i for i, ch in enumerate(all_chars)}
+vocab_size = len(all_chars)
+seq_len = 5  # 固定文本长度为5
+num_classes = 5  # “你”可能在第1到第5位，对应5个类别
+
+# 设置模型超参数并运行实验
+EMBED_SIZE, HIDDEN_SIZE = 32, 64
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# 2. 生成合成数据
+def generate_data(num_samples=2000):
+    data = []
+    for _ in range(num_samples):
+        # 随机决定“你”的位置 (0到4)
+        ni_pos = random.randint(0, seq_len - 1)
+        # 生成包含“你”的5字文本
+        text = [random.choice(all_chars.replace("你", "")) for _ in range(seq_len)]
+        text[ni_pos] = "你"
+        text_str = "".join(text)
+        # 标签就是“你”所在的位置索引
+        label = ni_pos
+        data.append((text_str, label))
+    return data
+
+
+# 3. 自定义 PyTorch 数据集类
+class TextPositionDataset(Dataset):
+    def __init__(self, data):
+        self.data = data
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        text_str, label = self.data[idx]
+        text_tensor = torch.tensor([char_to_idx[ch] for ch in text_str], dtype=torch.long)
+        return text_tensor, label
+
+
+
+# 基础 RNN 模型
+class SimpleRNN(nn.Module):
+    def __init__(self, vocab_size, embed_size, hidden_size, num_classes):
+        super(SimpleRNN, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_size)
+        self.rnn = nn.RNN(embed_size, hidden_size, batch_first=True)
+        self.fc = nn.Linear(hidden_size, num_classes)
+
+    def forward(self, x):
+        # x shape: [batch_size, seq_len]
+        x = self.embedding(x)  # [batch_size, seq_len, embed_size]
+        out, h_n = self.rnn(x)  # out: [batch_size, seq_len, hidden_size]
+        # 取最后一个时间步的输出进行分类
+        out = self.fc(out[:, -1, :])
+        return out
+
+
+# LSTM 模型
+class SimpleLSTM(nn.Module):
+    def __init__(self, vocab_size, embed_size, hidden_size, num_classes):
+        super(SimpleLSTM, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_size)
+        self.lstm = nn.LSTM(embed_size, hidden_size, batch_first=True)
+        self.fc = nn.Linear(hidden_size, num_classes)
+
+    def forward(self, x):
+        x = self.embedding(x)
+        out, (h_n, c_n) = self.lstm(x)  # LSTM 会多返回一个细胞状态 c_n
+        out = self.fc(out[:, -1, :])
+        return out
+
+
+def train_and_evaluate(model, train_loader, test_loader, epochs=20):
+
+    model = model.to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+    print(f"开始训练模型: {model.__class__.__name__}，设备: {device}")
+    for epoch in range(epochs):
+        model.train()
+        total_loss = 0
+        for texts, labels in train_loader:
+            texts, labels = texts.to(device), labels.to(device)
+
+            optimizer.zero_grad()
+            outputs = model(texts)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+
+        # 每个 epoch 结束后在测试集上评估
+        model.eval()
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for texts, labels in test_loader:
+                texts, labels = texts.to(device), labels.to(device)
+                outputs = model(texts)
+                _, predicted = torch.max(outputs, 1)
+                total += labels.size(0)
+                correct += (predicted == labels).sum().item()
+
+        accuracy = correct / total
+        print(f"Epoch [{epoch + 1}/{epochs}], Loss: {total_loss / len(train_loader):.4f}, Test Acc: {accuracy:.4f}")
+
+
+
+
+def main():
+    # 生成训练集和测试集
+    all_data = generate_data(2000)
+    train_data = TextPositionDataset(all_data[:1600])
+    test_data = TextPositionDataset(all_data[1600:])
+
+    # 创建 DataLoader
+    train_loader = DataLoader(train_data, batch_size=32, shuffle=True)
+    test_loader = DataLoader(test_data, batch_size=32, shuffle=False)
+
+
+    print(all_data[:5])
+    print(train_data[0])
+
+
+    # 1. 实验 RNN
+    rnn_model = SimpleRNN(vocab_size, EMBED_SIZE, HIDDEN_SIZE, num_classes)
+    train_and_evaluate(rnn_model, train_loader, test_loader)
+
+    print("-" * 30)
+
+    # 2. 实验 LSTM
+    lstm_model = SimpleLSTM(vocab_size, EMBED_SIZE, HIDDEN_SIZE, num_classes)
+    train_and_evaluate(lstm_model, train_loader, test_loader)
+
+
+
+if __name__ == "__main__":
+    main()
